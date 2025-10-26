@@ -20,6 +20,7 @@ import org.apache.logging.log4j.Logger;
 
 public class KAIMyEntityClient {
     public static final Logger logger = LogManager.getLogger();
+    public static volatile boolean reloadProperties = false;
     static final Minecraft MCinstance = Minecraft.getInstance();
     static final String gameDirectory = MCinstance.gameDirectory.getAbsolutePath();
     static final int BUFFER = 512;
