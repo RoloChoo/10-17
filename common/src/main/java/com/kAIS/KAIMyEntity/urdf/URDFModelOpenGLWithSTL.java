@@ -18,7 +18,7 @@ import java.io.File;
 public class URDFModelOpenGLWithSTL implements IMMDModel {
     private static final Logger logger = LogManager.getLogger();
     private static int renderCount = 0;
-    
+
     private URDFRobotModel robotModel;
     private String modelDir;
 
@@ -26,7 +26,6 @@ public class URDFModelOpenGLWithSTL implements IMMDModel {
         this.robotModel = robotModel;
         this.modelDir = modelDir;
         logger.info("=== URDF renderer Created ===");
-        
     }
 
     @Override
@@ -34,59 +33,65 @@ public class URDFModelOpenGLWithSTL implements IMMDModel {
                        Vector3f entityTrans, float tickDelta, PoseStack mat, int packedLight) {
 
         renderCount++;
-
         logger.info("=== URDF RENDER CALLED #" + renderCount + " ===");
         logger.info("Entity: " + entityIn.getName().getString());
 
-        //
+        // 기본 렌더 상태
         RenderSystem.enableBlend();
         RenderSystem.defaultBlendFunc();
         RenderSystem.enableDepthTest();
-        RenderSystem.disableDull();
+        RenderSystem.disableCull(); // 오타 fix: disableDull -> disableCull
 
-        Tesselater tesselator = Tesselator.getInstance();
-        BufferBuilder bufferBuilder = tesselator.begin(
-            VertexFormat.Mode.QUADS,
-            DefaultVertexFormat.POSITION_COLOR
-        );
+        // 정점 버퍼 셋업
+        Tesselator tesselator = Tesselator.getInstance();
+        BufferBuilder bufferBuilder = tesselator.getBuilder();
+        bufferBuilder.begin(VertexFormat.Mode.QUADS, DefaultVertexFormat.POSITION_COLOR);
 
         Matrix4f matrix = mat.last().pose();
         float size = 1.0f;
         float r = 1.0f, g = 0.0f, b = 0.0f, a = 1.0f;
 
+        // 6면 박스 (각 정점은 vertex(...).color(...).endVertex())
+        // Front (+Z)
+        bufferBuilder.vertex(matrix, -size, 0,  size).color(r, g, b, a).endVertex();
+        bufferBuilder.vertex(matrix,  size, 0,  size).color(r, g, b, a).endVertex();
+        bufferBuilder.vertex(matrix,  size, 2*size,  size).color(r, g, b, a).endVertex();
+        bufferBuilder.vertex(matrix, -size, 2*size,  size).color(r, g, b, a).endVertex();
 
-        // 6면 박스
-        // Front
-        bufferBuilder.addVertex(matrix, -size, 0, size).setColor(r, g, b, a);
-        bufferBuilder.addVertex(matrix, size, 0, size).setColor(r, g, b, a);
-        bufferBuilder.addVertex(matrix, size, 2*size, size).setColor(r, g, b, a);
-        bufferBuilder.addVertex(matrix, -size, 2*size, size).setColor(r, g, b, a);
+        // Back (-Z)
+        bufferBuilder.vertex(matrix,  size, 0, -size).color(r, g, b, a).endVertex();
+        bufferBuilder.vertex(matrix, -size, 0, -size).color(r, g, b, a).endVertex();
+        bufferBuilder.vertex(matrix, -size, 2*size, -size).color(r, g, b, a).endVertex();
+        bufferBuilder.vertex(matrix,  size, 2*size, -size).color(r, g, b, a).endVertex();
 
-        //back
-        bufferBuilder.addVertex(matrix, size, 0, -size).setColor(r, g, b, a);
-        bufferBuilder.addVertex(matrix, -size, 0, -size).setColor(r, g, b, a);
-        bufferBuilder.addVertex(matrix, -size, 2*size, -size).setColor(r, g, b, a);
-        bufferBuilder.addVertex(matrix, size, 2*size, -size).setColor(r, g, b, a);
+        // Top (+Y)
+        bufferBuilder.vertex(matrix, -size, 2*size, -size).color(r, g, b, a).endVertex();
+        bufferBuilder.vertex(matrix, -size, 2*size,  size).color(r, g, b, a).endVertex();
+        bufferBuilder.vertex(matrix,  size, 2*size,  size).color(r, g, b, a).endVertex();
+        bufferBuilder.vertex(matrix,  size, 2*size, -size).color(r, g, b, a).endVertex();
 
-        //Top
-        bufferBuilder.addVertex(matrix, -size, 2*size, -size).setColor(r, g, b, a);
-        bufferBuilder.addVertex(matrix, -size, 2*size, size).setColor(r, g, b, a);
-        bufferBuilder.addVertex(matrix, size, 2*size, size).setColor(r, g, b, a);
-        bufferBuilder.addVertex(matrix, size, 2*size, -size).setColor(r, g, b, a);
+        // Bottom (0)
+        bufferBuilder.vertex(matrix, -size, 0,  size).color(r, g, b, a).endVertex();
+        bufferBuilder.vertex(matrix, -size, 0, -size).color(r, g, b, a).endVertex();
+        bufferBuilder.vertex(matrix,  size, 0, -size).color(r, g, b, a).endVertex();
+        bufferBuilder.vertex(matrix,  size, 0,  size).color(r, g, b, a).endVertex();
 
-        //Bottom 
-        bufferBuilder.addVertex(matrix, -size, 0, size).setColor(r, g, b, a);
-        bufferBuilder.addVertex(matrix, -size, 0, -size).setColor(r, g, b, a);
-        bufferBuilder.addVertex(matrix, size, 0, -size).setColor(r, g, b, a);
-        bufferBuilder.addVertex(matrix, size, 0, size).setColor(r, g, b, a);
+        // Right (+X)
+        bufferBuilder.vertex(matrix,  size, 0,  size).color(r, g, b, a).endVertex();
+        bufferBuilder.vertex(matrix,  size, 0, -size).color(r, g, b, a).endVertex();
+        bufferBuilder.vertex(matrix,  size, 2*size, -size).color(r, g, b, a).endVertex();
+        bufferBuilder.vertex(matrix,  size, 2*size,  size).color(r, g, b, a).endVertex();
 
-        //RIght
-        bufferBuilder.addVertex(matrix, size, 0, size).setColor(r, g, b, a);
-        bufferBuilder.addVertex(matrix, size, 0, -size).setColor(r, g, b, a);
-        bufferBuilder.addvertex(matrix, size, 2*size, -size).setColor(r, g, b, a);
-        bufferBuilder.addvertex(matrix, size, 2*size, size).setColor(r, g, b, a);
-        
-        BufferUploader.darwWithSharder(bufferBuilder.buildOrThrow());
+        // Left (-X)
+        bufferBuilder.vertex(matrix, -size, 0, -size).color(r, g, b, a).endVertex();
+        bufferBuilder.vertex(matrix, -size, 0,  size).color(r, g, b, a).endVertex();
+        bufferBuilder.vertex(matrix, -size, 2*size,  size).color(r, g, b, a).endVertex();
+        bufferBuilder.vertex(matrix, -size, 2*size, -size).color(r, g, b, a).endVertex();
+
+        // 셰이더 지정 후 드로우 (오타 fix: darwWithSharder -> drawWithShader)
+        RenderSystem.setShader(GameRenderer::getPositionColorShader);
+        BufferUploader.drawWithShader(bufferBuilder.end());
+
         RenderSystem.enableCull();
 
         logger.info("Red Box render done");
@@ -111,7 +116,7 @@ public class URDFModelOpenGLWithSTL implements IMMDModel {
     public String GetModelDir() {
         return modelDir;
     }
-        
+
     public static URDFModelOpenGLWithSTL Create(String urdfPath, String modelDir) {
         logger.info("=== Creating URDF Renderer ===");
         logger.info("URDF: " + urdfPath);
@@ -132,7 +137,3 @@ public class URDFModelOpenGLWithSTL implements IMMDModel {
         return new URDFModelOpenGLWithSTL(robot, modelDir);
     }
 }
-
-            
-        
-    
