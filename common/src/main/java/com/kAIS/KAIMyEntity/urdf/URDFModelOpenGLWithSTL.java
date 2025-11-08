@@ -87,7 +87,7 @@ public class URDFModelOpenGLWithSTL implements IMMDModel {
 
         // 컨트롤/모션 초기화
         this.ctrl = new URDFSimpleController(robotModel.joints);
-        this.motionEditor = new URDFMotionEditor(robotModel, ctrl);
+        this.motionEditor = new URDFMotionEditor(null, this);
 
         // ✅ 모델 폴더에서 VRM/GLB 자동 탐색 & 로드 (있으면 스켈레톤 오버레이 활성화)
         try { loadVrmFromModelDir(); } catch (Throwable t) {
