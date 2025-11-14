@@ -7,8 +7,8 @@ import com.kAIS.KAIMyEntity.urdf.control.URDFVmcMapper;
 import com.kAIS.KAIMyEntity.urdf.control.VmcIk;
 import com.kAIS.KAIMyEntity.urdf.control.VmcListenerManager;
 
-import net.neoforged.neoforge.client.event.ClientTickEvent;   // NeoForge 클라 틱 이벤트
-import net.neoforged.neoforge.common.NeoForge;               // 이벤트 버스
+import net.neoforged.neoforge.client.event.ClientTickEvent;
+import net.neoforged.neoforge.common.NeoForge;
 
 import net.minecraft.client.Minecraft;
 import net.minecraft.network.chat.Component;
