@@ -33,6 +33,9 @@ public class URDFModelOpenGLWithSTL implements IMMDModel {
     private static final Logger logger = LogManager.getLogger();
     private static int renderCount = 0;
 
+    // ★ 최근 생성된 인스턴스 기록
+    public static volatile URDFModelOpenGLWithSTL LAST_CREATED = null;
+
     private URDFRobotModel robotModel;
     private String modelDir;
 
@@ -73,6 +76,9 @@ public class URDFModelOpenGLWithSTL implements IMMDModel {
         // 컨트롤/모션 초기화
         this.ctrl = new URDFSimpleController(robotModel.joints);
         this.motionEditor = new URDFMotionEditor(robotModel, ctrl);
+        
+        // ★ 최근 생성 인스턴스 기록
+        LAST_CREATED = this;
     }
 
     private void loadAllMeshes() {
