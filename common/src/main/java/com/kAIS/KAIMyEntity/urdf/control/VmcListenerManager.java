@@ -4,10 +4,11 @@ import org.joml.Quaternionf;
 import org.joml.Vector3f;
 
 import java.io.Closeable;
+import java.net.BindException;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetSocketAddress;
-import java.nio.ByteBuffer;
+import java.net.SocketException;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicReference;
@@ -15,11 +16,11 @@ import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * 최소 VMC 리스너:
- *  - UDP/OSC 수신(/VMC/Ext/Root/Pos, /VMC/Ext/Bone/Pos, /VMC/Ext/Blend/*)
+ *  - UDP/OSC 수신(/VMC/Ext/Root/Pos, /VMC/Ext/Bone/Pos, /VMC/Ext/Blend/*, /Local 변형 허용)
  *  - 스레드 안전 더블버퍼 상태 유지
  *  - 틱 루프에서 getBones()로 읽기(락-프리 스냅샷)
  *
- * 좌표계/스케일 변환은 URDFVmcMapper에서만 수행하세요(중복 금지).
+ * 좌표/스케일 변환은 URDFVmcMapper에서만 수행하세요(중복 금지).
  */
 public final class VmcListenerManager {
     private VmcListenerManager() {}
@@ -27,33 +28,62 @@ public final class VmcListenerManager {
     // ───────────── 퍼사드(외부 API) ─────────────
     private static final StateHolder STATE = new StateHolder();
     private static volatile UdpLoop loop;
-    private static volatile boolean running = false;
+
+    /** 실행 상태는 실제 스레드 라이프사이클로 판정(바인드 실패 직후 종료 반영) */
+    public static boolean isRunning() {
+        UdpLoop l = loop;
+        return l != null && l.isAlive() && !l.isClosed();
+    }
 
     public static synchronized void start(int port) {
-        if (running) return;
+        if (isRunning()) return;
         loop = new UdpLoop(port, STATE);
         loop.start();
-        running = true;
-        System.out.println("[VMC] listener started on UDP " + port);
+        System.out.println("[VMC] listener starting on UDP " + port);
     }
 
     public static synchronized void stop() {
-        running = false;
-        if (loop != null) { loop.close(); loop = null; }
+        if (loop != null) {
+            loop.close();
+            loop = null;
+        }
         System.out.println("[VMC] listener stopped");
     }
 
     /** 스냅샷의 '본 맵'만 바로 꺼내 쓰기(URDFVmcMapper와 호환되는 Transform 객체 보유) */
     public static Map<String, Object> getBones() {
         Snapshot s = STATE.read();
-        if (s == null) return Collections.emptyMap();
-        return s.boneTransforms;
+        return (s == null) ? Collections.emptyMap() : s.boneTransforms;
     }
 
     /** 상태 전체 스냅샷(원하면 사용) */
     public static Snapshot getSnapshot() { return STATE.read(); }
 
-    public static boolean isRunning() { return running; }
+    // ───────────── 진단(클라 채팅에서 사용) ─────────────
+    private static volatile long lastPacketMs = 0;
+    private static volatile int  totalPackets = 0;
+    private static volatile int  vmcMsgCount  = 0;
+    private static volatile int  nonVmcMsgCount = 0;
+    private static final int MAX_ADDR_SAMPLES = 8;
+    private static final Deque<String> recentAddrs = new ArrayDeque<>();
+
+    public static final class Diagnostics {
+        public final boolean running;
+        public final long lastPacketMs;
+        public final int totalPackets, vmcMsgCount, nonVmcMsgCount;
+        public final List<String> recentAddresses;
+        Diagnostics(boolean running, long lastPacketMs, int total, int vmc, int nonVmc, List<String> addrs){
+            this.running = running; this.lastPacketMs = lastPacketMs;
+            this.totalPackets = total; this.vmcMsgCount = vmc; this.nonVmcMsgCount = nonVmc;
+            this.recentAddresses = addrs;
+        }
+    }
+    public static Diagnostics getDiagnostics() {
+        return new Diagnostics(
+                isRunning(), lastPacketMs, totalPackets, vmcMsgCount, nonVmcMsgCount,
+                new ArrayList<>(recentAddrs)
+        );
+    }
 
     // ───────────── 상태 표현 ─────────────
     /** 리플렉션을 위해 public 필드 사용: position(Vector3f), rotation(Quaternionf) */
@@ -111,8 +141,12 @@ public final class VmcListenerManager {
                     bonesR.put(e.getKey(), copy);
                 }
                 Map<String, Float> blendsR = new HashMap<>(blendsW);
-                readRef.set(new Snapshot(rootR, Collections.unmodifiableMap(bonesR),
-                        Collections.unmodifiableMap(blendsR), lastUpdateW));
+                readRef.set(new Snapshot(
+                        rootR,
+                        Collections.unmodifiableMap(bonesR),
+                        Collections.unmodifiableMap(blendsR),
+                        lastUpdateW
+                ));
             } finally {
                 writeLock.unlock();
             }
@@ -170,21 +204,39 @@ public final class VmcListenerManager {
             this.state = state;
         }
 
+        boolean isClosed() { return closed; }
+
         @Override public void run() {
             try {
-                socket = new DatagramSocket(new InetSocketAddress("0.0.0.0", port));
+                socket = new DatagramSocket(null);
+                socket.setReuseAddress(true);
+                socket.bind(new InetSocketAddress("0.0.0.0", port));
                 socket.setReceiveBufferSize(1 << 20); // 1MB
-                byte[] buf = new byte[65507]; // UDP max
+
+                byte[] buf = new byte[65536];
                 DatagramPacket pkt = new DatagramPacket(buf, buf.length);
 
                 while (!closed) {
-                    socket.receive(pkt);
+                    try {
+                        socket.receive(pkt);
+                    } catch (SocketException se) {
+                        if (closed) break; // 정상 종료
+                        System.out.println("[VMC] socket receive error: " + se);
+                        continue;
+                    }
+
                     final int len = pkt.getLength();
                     if (len <= 0) continue;
 
-                    // 패킷 하나 처리(번들/메시지 포함)
-                    processPacket(buf, len);
+                    try {
+                        processPacket(buf, len);
+                    } catch (Throwable e) {
+                        System.out.println("[VMC] decode error: " + e.getClass().getSimpleName());
+                    }
                 }
+            } catch (BindException be) {
+                System.out.println("[VMC] UDP bind failed on " + port + " (in use?): " + be);
+                throw new RuntimeException(be);
             } catch (Exception e) {
                 if (!closed) e.printStackTrace();
             } finally {
@@ -193,20 +245,29 @@ public final class VmcListenerManager {
         }
 
         private void processPacket(byte[] data, int len) {
-            // 번들은 여러 메시지를 포함 → 한 번의 write 블록에서 처리/커밋
             state.write(sh -> {
                 Osc.decode(data, 0, len, (addr, args) -> {
+                    // ── 진단 집계 ──
+                    lastPacketMs = System.currentTimeMillis();
+                    totalPackets++;
+                    boolean isVmc = addr.startsWith("/VMC/Ext/");
+                    if (isVmc) vmcMsgCount++; else nonVmcMsgCount++;
+                    if (recentAddrs.size() >= MAX_ADDR_SAMPLES) recentAddrs.removeFirst();
+                    recentAddrs.addLast(addr);
+
                     switch (addr) {
-                        case "/VMC/Ext/Root/Pos": {
+                        case "/VMC/Ext/Root/Pos":
+                        case "/VMC/Ext/Root/Pos/Local": {
                             // ["root", px,py,pz, qx,qy,qz,qw]
-                            if (args.length >= 8 && args[0] instanceof String s) {
+                            if (args.length >= 8 && args[0] instanceof String) {
                                 float px = f(args,1), py=f(args,2), pz=f(args,3);
                                 float qx = f(args,4), qy=f(args,5), qz=f(args,6), qw=f(args,7);
                                 sh.setRoot(px, py, pz, qx, qy, qz, qw);
                             }
                             break;
                         }
-                        case "/VMC/Ext/Bone/Pos": {
+                        case "/VMC/Ext/Bone/Pos":
+                        case "/VMC/Ext/Bone/Pos/Local": {
                             // [boneName, px,py,pz, qx,qy,qz,qw]
                             if (args.length >= 8 && args[0] instanceof String bone) {
                                 float px = f(args,1), py=f(args,2), pz=f(args,3);
@@ -216,10 +277,8 @@ public final class VmcListenerManager {
                             break;
                         }
                         case "/VMC/Ext/Blend/Val": {
-                            // [name, value]
                             if (args.length >= 2 && args[0] instanceof String name) {
-                                float v = f(args,1);
-                                sh.setBlendPending(name, v);
+                                sh.setBlendPending(name, f(args,1));
                             }
                             break;
                         }
@@ -228,7 +287,8 @@ public final class VmcListenerManager {
                             break;
                         }
                         default:
-                            // 필요한 주소만 처리
+                            // 필요하면 여기서 VRChat OSC를 blends로 매핑할 수 있음:
+                            // if (addr.startsWith("/avatar/parameters/")) { ... }
                             break;
                     }
                 });
@@ -254,8 +314,7 @@ public final class VmcListenerManager {
         interface Handler { void onMessage(String address, Object[] args); }
 
         static void decode(byte[] buf, int off, int len, Handler h) {
-            // 번들이면 재귀적으로 요소 순회, 아니면 단일 메시지
-            if (startsWith(buf, off, len, "#bundle\0")) {
+            if (startsWith(buf, off, len, "#bundle")) {
                 int p = off + padLen("#bundle");
                 p += 8; // timetag skip
                 while (p + 4 <= off + len) {
@@ -271,39 +330,35 @@ public final class VmcListenerManager {
 
         private static void decodeMessage(byte[] buf, int off, int len, Handler h) {
             int p = off;
-            String address = readString(buf, p, off + len); p += padLen(address);
-            if (address == null) return;
+            String address = readString(buf, p, off + len); if (address == null) return;
+            p += padLen(address);
 
-            String types = readString(buf, p, off + len); p += padLen(types);
+            String types = readString(buf, p, off + len);
             if (types == null || types.isEmpty() || types.charAt(0) != ',') return;
+            p += padLen(types);
 
-            List<Object> args = new ArrayList<>(Math.max(0, types.length()-1));
+            List<Object> args = new ArrayList<>(Math.max(0, types.length() - 1));
             for (int i = 1; i < types.length(); i++) {
                 char t = types.charAt(i);
                 switch (t) {
                     case 's': {
-                        String s = readString(buf, p, off + len);
-                        if (s == null) return;
-                        args.add(s);
-                        p += padLen(s);
+                        String s = readString(buf, p, off + len); if (s == null) return;
+                        args.add(s); p += padLen(s);
                         break;
                     }
                     case 'f': {
                         if (p + 4 > off + len) return;
                         float f = Float.intBitsToFloat(readInt(buf, p));
-                        args.add(f);
-                        p += 4;
+                        args.add(f); p += 4;
                         break;
                     }
-                    case 'i': { // 드물게 int도 올 수 있음
+                    case 'i': {
                         if (p + 4 > off + len) return;
                         int iv = readInt(buf, p);
-                        args.add(iv);
-                        p += 4;
+                        args.add(iv); p += 4;
                         break;
                     }
                     default:
-                        // 미지원 타입은 스킵 불가 → 메시지 중단
                         return;
                 }
             }
@@ -313,27 +368,25 @@ public final class VmcListenerManager {
         private static boolean startsWith(byte[] b, int off, int len, String s) {
             byte[] a = s.getBytes(StandardCharsets.US_ASCII);
             if (len < a.length) return false;
-            for (int i=0;i<a.length;i++) if (b[off+i] != a[i]) return false;
+            for (int i = 0; i < a.length; i++) if (b[off + i] != a[i]) return false;
             return true;
         }
         private static int readInt(byte[] b, int p) {
-            return ((b[p] & 0xFF) << 24) | ((b[p+1] & 0xFF) << 16) | ((b[p+2] & 0xFF) << 8) | (b[p+3] & 0xFF);
+            return ((b[p] & 0xFF) << 24)
+                    | ((b[p+1] & 0xFF) << 16)
+                    | ((b[p+2] & 0xFF) << 8)
+                    |  (b[p+3] & 0xFF);
         }
         private static String readString(byte[] b, int p, int end) {
             int q = p;
             while (q < end && b[q] != 0) q++;
             if (q >= end) return null;
-            String s = new String(b, p, q - p, StandardCharsets.US_ASCII);
-            return s;
+            return new String(b, p, q - p, StandardCharsets.US_ASCII);
         }
         private static int padLen(String s) {
-            // OSC 문자열: 실제문자열 + '\0', 4바이트 정렬
             int n = s.getBytes(StandardCharsets.US_ASCII).length + 1;
             int pad = (4 - (n % 4)) & 3;
             return n + pad;
         }
-        @SuppressWarnings("unused")
-        private static int padLen(StringBuilder sb) { return padLen(sb.toString()); }
-        private static int padLen(String sMaybeNull, int p) { return padLen(sMaybeNull); }
     }
 }
