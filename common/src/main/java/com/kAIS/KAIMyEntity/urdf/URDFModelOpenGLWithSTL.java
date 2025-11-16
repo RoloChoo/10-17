@@ -57,7 +57,7 @@ public class URDFModelOpenGLWithSTL implements IMMDModel {
     private static final boolean FORWARD_NEG_Z = true;             // 정면을 -Z(기본) / +Z
     private static final Vector3f DST_UP  = new Vector3f(0, 1, 0);
     private static final Vector3f DST_FWD = FORWARD_NEG_Z ? new Vector3f(0, 0, -1)
-                                                          : new Vector3f(0, 0,  1);
+            : new Vector3f(0, 0,  1);
 
     /** 루트에서 1회만 적용하는 업라이트 보정 */
     private static final Quaternionf Q_ROS2MC = makeUprightQuat(SRC_UP, SRC_FWD, DST_UP, DST_FWD);
@@ -76,7 +76,7 @@ public class URDFModelOpenGLWithSTL implements IMMDModel {
         // 컨트롤/모션 초기화
         this.ctrl = new URDFSimpleController(robotModel.joints);
         this.motionEditor = new URDFMotionEditor(robotModel, ctrl);
-        
+
         // ★ 최근 생성 인스턴스 기록
         LAST_CREATED = this;
     }
@@ -237,10 +237,10 @@ public class URDFModelOpenGLWithSTL implements IMMDModel {
                 float nz = FLIP_NORMALS ? -n.z : n.z;
 
                 vc.addVertex(matrix, v.x, v.y, v.z)
-                  .setColor(r, g, b, a)
-                  .setUv(0.5f, 0.5f)
-                  .setUv2(blockLight, skyLight)
-                  .setNormal(nx, ny, nz);
+                        .setColor(r, g, b, a)
+                        .setUv(0.5f, 0.5f)
+                        .setUv2(blockLight, skyLight)
+                        .setNormal(nx, ny, nz);
             }
         }
     }
@@ -281,7 +281,7 @@ public class URDFModelOpenGLWithSTL implements IMMDModel {
             case CONTINUOUS: {
                 Vector3f axis;
                 if (joint.axis == null || joint.axis.xyz == null ||
-                    joint.axis.xyz.lengthSquared() < 1e-12f) {
+                        joint.axis.xyz.lengthSquared() < 1e-12f) {
                     axis = new Vector3f(1, 0, 0); // 기본축 X
                 } else {
                     axis = new Vector3f(joint.axis.xyz);
@@ -295,7 +295,7 @@ public class URDFModelOpenGLWithSTL implements IMMDModel {
             case PRISMATIC: {
                 Vector3f axis;
                 if (joint.axis == null || joint.axis.xyz == null ||
-                    joint.axis.xyz.lengthSquared() < 1e-12f) {
+                        joint.axis.xyz.lengthSquared() < 1e-12f) {
                     axis = new Vector3f(1, 0, 0); // 기본축 X
                 } else {
                     axis = new Vector3f(joint.axis.xyz);
