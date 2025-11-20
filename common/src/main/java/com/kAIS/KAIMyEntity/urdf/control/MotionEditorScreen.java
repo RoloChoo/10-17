@@ -2,15 +2,18 @@ package com.kAIS.KAIMyEntity.urdf.control;
 
 import com.kAIS.KAIMyEntity.urdf.URDFModelOpenGLWithSTL;
 import net.minecraft.client.Minecraft;
-import org.joml.*;
+import org.joml.Quaternionf;
+import org.joml.Vector3f;
 
-import java.util.*;
+import java.util.Map;
 
-import static java.lang.Math.*;
+import static java.lang.Math.abs;
 
 /**
- * 2025.11.20 VMC Direct Control (슬라이더 방식 그대로)
- * 2025.11.20 최종 수정: URDF 관절 정의와 100% 일치 (pitch/roll/elbow 부호 완벽 매칭)
+ * 2025.11.20 VMC Direct Control (Fixed with Atomic Snapshot + Bone Mapping Fix)
+ * - Atomic Snapshot 적용으로 Tearing 및 떨림/멈춤 방지
+ * - World Coordinate 기반 역학 계산
+ * - UpperChest 매핑 문제 해결 (VSeeFace/VMagicMirror 완벽 호환)
  */
 public final class MotionEditorScreen {
     private MotionEditorScreen() {}
@@ -20,13 +23,19 @@ public final class MotionEditorScreen {
         listener.setBoneNameNormalizer(original -> {
             if (original == null) return null;
             String lower = original.toLowerCase().trim();
+
             return switch (lower) {
-                case "leftupperarm", "leftarm", "left_arm", "upperarm_left", "arm.l", "leftshoulder" -> "LeftUpperArm";
+                // 팔
+                case "leftupperarm", "leftarm", "left_arm", "upperarm_left", "arm.l", "leftshoulder", "larm" -> "LeftUpperArm";
                 case "leftlowerarm", "leftforearm", "lowerarm_left", "forearm.l", "leftelbow" -> "LeftLowerArm";
                 case "lefthand", "hand.l", "hand_left", "left_wrist", "left_hand" -> "LeftHand";
-                case "rightupperarm", "rightarm", "right_arm", "upperarm_right", "arm.r", "rightshoulder" -> "RightUpperArm";
+                case "rightupperarm", "rightarm", "right_arm", "upperarm_right", "arm.r", "rightshoulder", "rarm" -> "RightUpperArm";
                 case "rightlowerarm", "rightforearm", "lowerarm_right", "forearm.r", "rightelbow" -> "RightLowerArm";
                 case "righthand", "hand.r", "hand_right", "right_wrist", "right_hand" -> "RightHand";
+
+                // ★★★ Chest 매핑 확장 (VSeeFace/VMagicMirror UpperChest 대응) ★★★
+                case "chest", "upperchest", "spine", "spine1", "spine2", "spine3", "torso", "upper_chest", "chest2" -> "Chest";
+
                 default -> original;
             };
         });
@@ -47,80 +56,85 @@ public final class MotionEditorScreen {
     }
 }
 
-/* ======================== VmcDrive ======================== */
+/* ======================== VmcDrive (Atomic Snapshot 적용) ======================== */
 final class VmcDrive {
 
     static void tick(URDFModelOpenGLWithSTL renderer) {
         var listener = VMCListenerController.VmcListener.getInstance();
-        Map<String, VMCListenerController.VmcListener.BoneTransform> bones = listener.getBones();
+        
+        // [핵심] getBones() 대신 getSnapshot() 사용
+        // 이 맵은 이 메서드가 실행되는 동안 절대 변하지 않음 (Atomic Reference)
+        Map<String, VMCListenerController.VmcListener.Transform> bones = listener.getSnapshot();
 
         if (bones.isEmpty()) return;
 
-        // 몸통 회전 (Chest → Spine → Hips fallback)
-        Quaternionf trunkRotation = new Quaternionf(); // identity
-        if (bones.containsKey("Chest")) {
-            trunkRotation.set(bones.get("Chest").rotation);
-        } else if (bones.containsKey("Spine")) {
-            trunkRotation.set(bones.get("Spine").rotation);
-        } else if (bones.containsKey("Hips")) {
-            trunkRotation.set(bones.get("Hips").rotation);
+        // ★ 디버깅용 로그 (Chest 매핑 확인) ★
+        System.out.println("[VMC] tick - Bones: " + bones.size() + 
+            " | Chest: " + bones.containsKey("Chest") +
+            " | LeftUA: " + bones.containsKey("LeftUpperArm") +
+            " | RightUA: " + bones.containsKey("RightUpperArm"));
+
+        // 부모(Chest) 찾기
+        VMCListenerController.VmcListener.Transform chest = bones.get("Chest");
+        if (chest == null) chest = bones.get("Spine");
+        if (chest == null) chest = bones.get("Hips");
+
+        if (chest == null) {
+            System.out.println("[VMC] ERROR: Chest bone not found! Available: " + bones.keySet());
+            return;
         }
 
-        processArm(renderer, bones, trunkRotation, true);  // 왼팔
-        processArm(renderer, bones, trunkRotation, false); // 오른팔
+        processArmQuaternion(renderer, bones, chest, true);  // 왼팔
+        processArmQuaternion(renderer, bones, chest, false); // 오른팔
     }
 
-    private static void processArm(URDFModelOpenGLWithSTL renderer,
-                                   Map<String, VMCListenerController.VmcListener.BoneTransform> bones,
-                                   Quaternionf trunkRotation,
-                                   boolean isLeft) {
+    private static void processArmQuaternion(URDFModelOpenGLWithSTL renderer,
+                                             Map<String, VMCListenerController.VmcListener.Transform> bones,
+                                             VMCListenerController.VmcListener.Transform parentBone,
+                                             boolean isLeft) {
         String upperName = isLeft ? "LeftUpperArm" : "RightUpperArm";
         String lowerName = isLeft ? "LeftLowerArm" : "RightLowerArm";
-        String handName  = isLeft ? "LeftHand"     : "RightHand";
 
         var upper = bones.get(upperName);
         var lower = bones.get(lowerName);
-        var hand  = bones.get(handName);
 
-        if (upper == null || lower == null) return;
+        if (upper == null) return;
 
-        // 1. 상박 방향 벡터 (월드)
-        Vector3f upperVec = new Vector3f(lower.position).sub(upper.position);
-        if (upperVec.lengthSquared() < 1e-6f) return;
-        upperVec.normalize();
+        // [계산 로직] Atomic Snapshot 덕분에 parentBone과 upper는 같은 시간대의 데이터임이 보장됨.
+        // 따라서 World -> Local 변환(Q_rel = Q_parent^-1 * Q_child)이 정확하게 수행됨.
 
-        // 몸통 기준 로컬 방향
-        Quaternionf invTrunk = new Quaternionf(trunkRotation).conjugate();
-        Vector3f localVec = new Vector3f(upperVec).rotate(invTrunk);
+        // === 1. 어깨 관절 (Shoulder) 계산 ===
+        Quaternionf parentRot = new Quaternionf(parentBone.rotation);
+        Quaternionf childRot  = new Quaternionf(upper.rotation);
+        
+        Quaternionf localShoulder = new Quaternionf(parentRot).conjugate().mul(childRot);
 
-        // ★★★ 당신의 URDF와 정확히 일치하는 최종 매핑 ★★★
-        float pitch = (float) -atan2(localVec.z, localVec.y);  // +면 앞쪽으로 돌아감 → 완벽
-        float roll  = (float) -atan2(localVec.x, localVec.y);  // +면 아래로 내려감 (왼쪽/오른쪽 모두) → 완벽
+        Vector3f shoulderEuler = new Vector3f();
+        localShoulder.getEulerAnglesXYZ(shoulderEuler);
 
-        // 2. 팔꿈치 각도
-        float elbowAngle = 0f;
-        if (hand != null) {
-            Vector3f lowerVec = new Vector3f(hand.position).sub(lower.position);
-            if (lowerVec.lengthSquared() > 1e-6f) {
-                lowerVec.normalize();
-                float dot = max(-1f, min(1f, upperVec.dot(lowerVec)));
-                elbowAngle = (float) acos(dot);
-
-                // 왼쪽: 음수 = 안쪽으로 접힘, 오른쪽: 양수 = 안쪽으로 접힘 → 당신 URDF와 정확히 일치
-                elbowAngle = isLeft ? -elbowAngle : elbowAngle;
-            }
+        // === 2. 팔꿈치 관절 (Elbow) 계산 ===
+        Vector3f elbowEuler = new Vector3f();
+        if (lower != null) {
+            Quaternionf upperRot = new Quaternionf(upper.rotation);
+            Quaternionf lowerRot = new Quaternionf(lower.rotation);
+            
+            Quaternionf localElbow = new Quaternionf(upperRot).conjugate().mul(lowerRot);
+            localElbow.getEulerAnglesXYZ(elbowEuler);
         }
 
-        // 3. URDF 조인트에 적용
+        // === 3. URDF 적용 ===
         String pitchJoint = isLeft ? "l_sho_pitch" : "r_sho_pitch";
         String rollJoint  = isLeft ? "l_sho_roll"  : "r_sho_roll";
         String elbowJoint = isLeft ? "l_el"        : "r_el";
 
-        renderer.setJointPreview(pitchJoint, pitch);
-        renderer.setJointTarget(pitchJoint, pitch);
+        renderer.setJointPreview(pitchJoint, shoulderEuler.x);
+        renderer.setJointTarget(pitchJoint, shoulderEuler.x);
 
-        renderer.setJointPreview(rollJoint, roll);
-        renderer.setJointTarget(rollJoint, roll);
+        renderer.setJointPreview(rollJoint, shoulderEuler.z);
+        renderer.setJointTarget(rollJoint, shoulderEuler.z);
+
+        float elbowAngle = abs(elbowEuler.z);
+        if (isLeft) elbowAngle = -elbowAngle;
 
         renderer.setJointPreview(elbowJoint, elbowAngle);
         renderer.setJointTarget(elbowJoint, elbowAngle);
