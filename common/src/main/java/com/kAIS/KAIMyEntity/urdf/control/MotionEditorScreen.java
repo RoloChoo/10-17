@@ -1,6 +1,7 @@
 package com.kAIS.KAIMyEntity.urdf.control;
 
 import com.kAIS.KAIMyEntity.urdf.URDFModelOpenGLWithSTL;
+import com.kAIS.KAIMyEntity.webots.WebotsController; // ✅ 추가
 import net.minecraft.client.Minecraft;
 import org.joml.Quaternionf;
 import org.joml.Vector3f;
@@ -14,6 +15,10 @@ import static java.lang.Math.abs;
  * - Atomic Snapshot 적용으로 Tearing 및 떨림/멈춤 방지
  * - World Coordinate 기반 역학 계산
  * - UpperChest 매핑 문제 해결 (VSeeFace/VMagicMirror 완벽 호환)
+ * 
+ * ✅ 2025.11.21 Webots 연동 추가
+ * - URDF 업데이트 후 자동으로 Webots로 전송
+ * - 기존 로직 완전 보존
  */
 public final class MotionEditorScreen {
     private MotionEditorScreen() {}
@@ -56,7 +61,7 @@ public final class MotionEditorScreen {
     }
 }
 
-/* ======================== VmcDrive (Atomic Snapshot 적용) ======================== */
+/* ======================== VmcDrive (Atomic Snapshot 적용 + Webots 연동) ======================== */
 final class VmcDrive {
 
     static void tick(URDFModelOpenGLWithSTL renderer) {
@@ -84,8 +89,12 @@ final class VmcDrive {
             return;
         }
 
+        // ✅ 기존 로직: URDF 업데이트
         processArmQuaternion(renderer, bones, chest, true);  // 왼팔
         processArmQuaternion(renderer, bones, chest, false); // 오른팔
+        
+        // ✅ 추가 로직: Webots 전송 (기존 로직에 영향 없음)
+        sendToWebots(renderer);
     }
 
     private static void processArmQuaternion(URDFModelOpenGLWithSTL renderer,
@@ -122,7 +131,7 @@ final class VmcDrive {
             localElbow.getEulerAnglesXYZ(elbowEuler);
         }
 
-        // === 3. URDF 적용 ===
+        // === 3. URDF 적용 (기존 로직 유지) ===
         String pitchJoint = isLeft ? "l_sho_pitch" : "r_sho_pitch";
         String rollJoint  = isLeft ? "l_sho_roll"  : "r_sho_roll";
         String elbowJoint = isLeft ? "l_el"        : "r_el";
@@ -138,5 +147,36 @@ final class VmcDrive {
 
         renderer.setJointPreview(elbowJoint, elbowAngle);
         renderer.setJointTarget(elbowJoint, elbowAngle);
+    }
+    
+    // ✅ 새로운 메서드: Webots 전송 (기존 로직과 완전히 분리)
+    /**
+     * URDF의 모든 가동 관절을 Webots로 전송
+     * - 기존 VMC → URDF 로직에 영향 없음
+     * - WebotsController가 없으면 조용히 스킵
+     */
+    private static void sendToWebots(URDFModelOpenGLWithSTL renderer) {
+        try {
+            WebotsController webots = WebotsController.getInstance();
+            
+            // 연결 안 되어 있으면 스킵 (에러 없이 조용히 무시)
+            if (!webots.isConnected()) {
+                return;
+            }
+            
+            // URDF의 모든 가동 관절 전송
+            var robot = renderer.getRobotModel();
+            if (robot == null || robot.joints == null) return;
+            
+            for (var joint : robot.joints) {
+                if (joint.isMovable()) {
+                    webots.setJoint(joint.name, joint.currentPosition);
+                }
+            }
+            
+        } catch (Exception e) {
+            // WebotsController가 초기화되지 않았거나 기타 에러
+            // 조용히 무시 (VMC 기능에 영향 주지 않음)
+        }
     }
 }
